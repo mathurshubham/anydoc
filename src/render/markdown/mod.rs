@@ -8,7 +8,9 @@ mod table;
 #[cfg(test)]
 mod tests;
 
-use crate::model::{Block, Document, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty};
+use crate::model::{
+    Block, Document, DocumentMeta, Inline, List, MarkerKind, Note, TableKind, inlines_are_empty,
+};
 use anchors::{AnchorMap, resolve_anchors};
 use escape::{EscapeOpts, InlineContext, backtick_fence, escape_text};
 use inline::render_inlines;
@@ -70,6 +72,66 @@ pub fn document_to_markdown(doc: &Document) -> String {
     if !out.is_empty() {
         out.push('\n');
     }
+    match render_front_matter(&doc.meta) {
+        Some(fm) if out.is_empty() => format!("{fm}\n"),
+        Some(fm) => format!("{fm}\n\n{out}"),
+        None => out,
+    }
+}
+
+/// A YAML front-matter block for the document's metadata, or `None` when it
+/// carries none. The block is `---`-fenced; every value is quoted and escaped
+/// so titles with colons, quotes, or leading dashes stay valid YAML.
+fn render_front_matter(meta: &DocumentMeta) -> Option<String> {
+    if meta.is_empty() {
+        return None;
+    }
+    fn field(fm: &mut String, key: &str, value: &str) {
+        fm.push_str(&format!("{key}: {}\n", yaml_quote(value)));
+    }
+    let mut fm = String::from("---\n");
+    if let Some(title) = &meta.title {
+        field(&mut fm, "title", title);
+    }
+    match meta.authors.as_slice() {
+        [] => {}
+        [one] => field(&mut fm, "author", one),
+        many => {
+            fm.push_str("author:\n");
+            for author in many {
+                fm.push_str(&format!("  - {}\n", yaml_quote(author)));
+            }
+        }
+    }
+    if let Some(language) = &meta.language {
+        field(&mut fm, "language", language);
+    }
+    if let Some(date) = &meta.date {
+        field(&mut fm, "date", date);
+    }
+    if let Some(publisher) = &meta.publisher {
+        field(&mut fm, "publisher", publisher);
+    }
+    if let Some(description) = &meta.description {
+        field(&mut fm, "description", description);
+    }
+    fm.push_str("---");
+    Some(fm)
+}
+
+/// Quote a metadata value as a YAML double-quoted scalar: collapse to a single
+/// line, then escape `\` and `"`.
+fn yaml_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.split_whitespace().collect::<Vec<_>>().join(" ").chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -157,10 +219,59 @@ fn render_blocks(blocks: &[Block], rc: &Ctx) -> String {
     parts.join("\n\n")
 }
 
+/// Strip a whole-heading bold/italic that the `#` prefix already conveys.
+///
+/// Only emphasis shared by *every* non-whitespace text run is removed, so
+/// partial emphasis (a `<b>` on part of the heading) survives. Whitespace-only
+/// runs are ignored when deciding uniformity: the inline normalizer treats them
+/// as unstyled and bridges styled runs split only by whitespace, so counting
+/// them would wrongly veto the strip on shapes like `**A** **B**`.
+fn strip_uniform_heading_emphasis(content: &[Inline]) -> Vec<Inline> {
+    fn scan(inlines: &[Inline], all_bold: &mut bool, all_italic: &mut bool, any: &mut bool) {
+        for inline in inlines {
+            match inline {
+                Inline::Text { text, style } => {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    *any = true;
+                    *all_bold &= style.bold;
+                    *all_italic &= style.italic;
+                }
+                Inline::Link { content, .. } => scan(content, all_bold, all_italic, any),
+                _ => {}
+            }
+        }
+    }
+    fn apply(inlines: &mut [Inline], strip_bold: bool, strip_italic: bool) {
+        for inline in inlines {
+            match inline {
+                Inline::Text { style, .. } => {
+                    style.bold &= !strip_bold;
+                    style.italic &= !strip_italic;
+                }
+                Inline::Link { content, .. } => apply(content, strip_bold, strip_italic),
+                _ => {}
+            }
+        }
+    }
+
+    let (mut all_bold, mut all_italic, mut any) = (true, true, false);
+    scan(content, &mut all_bold, &mut all_italic, &mut any);
+    let mut out = content.to_vec();
+    // Require at least one non-whitespace run before treating the heading as
+    // uniformly emphasized.
+    if any {
+        apply(&mut out, all_bold, all_italic);
+    }
+    out
+}
+
 fn render_block(block: &Block, rc: &Ctx) -> Option<String> {
     match block {
         Block::Heading { level, content, .. } => {
-            let text = render_inlines(content, InlineContext::Heading, rc);
+            let content = strip_uniform_heading_emphasis(content);
+            let text = render_inlines(&content, InlineContext::Heading, rc);
             let text = text.trim();
             if text.is_empty() {
                 return None;

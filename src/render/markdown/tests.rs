@@ -5,7 +5,7 @@ use crate::model::{
 };
 
 fn doc(blocks: Vec<Block>) -> String {
-    document_to_markdown(&Document { blocks, notes: Vec::new(), assets: Vec::new() })
+    document_to_markdown(&Document { blocks, ..Default::default() })
 }
 
 fn styled(text: &str, style: Style) -> Inline {
@@ -27,6 +27,98 @@ const ITALIC: Style = Style { bold: false, italic: true, strike: false, code: fa
 fn heading_and_paragraph() {
     let md = doc(vec![heading(2, "Title"), Block::Paragraph(vec![Inline::plain("Hello world.")])]);
     assert_eq!(md, "## Title\n\nHello world.\n");
+}
+
+const BOLDITALIC: Style = Style { bold: true, italic: true, strike: false, code: false };
+
+fn doc_with_meta(meta: crate::model::DocumentMeta, blocks: Vec<Block>) -> String {
+    document_to_markdown(&Document { meta, blocks, ..Default::default() })
+}
+
+#[test]
+fn front_matter_single_author() {
+    let meta = crate::model::DocumentMeta {
+        title: Some("My Book".into()),
+        authors: vec!["Ada".into()],
+        language: Some("en".into()),
+        ..Default::default()
+    };
+    let md = doc_with_meta(meta, vec![heading(1, "Chapter")]);
+    assert_eq!(
+        md,
+        "---\ntitle: \"My Book\"\nauthor: \"Ada\"\nlanguage: \"en\"\n---\n\n# Chapter\n"
+    );
+}
+
+#[test]
+fn front_matter_multiple_authors_render_as_a_list() {
+    let meta = crate::model::DocumentMeta {
+        title: Some("Two Authors".into()),
+        authors: vec!["Ada".into(), "Grace".into()],
+        ..Default::default()
+    };
+    let md = doc_with_meta(meta, vec![]);
+    assert_eq!(md, "---\ntitle: \"Two Authors\"\nauthor:\n  - \"Ada\"\n  - \"Grace\"\n---\n");
+}
+
+#[test]
+fn front_matter_quotes_and_collapses_values() {
+    // Colons, quotes, backslashes, and newlines must not break the YAML.
+    let meta = crate::model::DocumentMeta {
+        title: Some("A: \"quoted\"\nand \\ split".into()),
+        ..Default::default()
+    };
+    let md = doc_with_meta(meta, vec![]);
+    assert_eq!(md, "---\ntitle: \"A: \\\"quoted\\\" and \\\\ split\"\n---\n");
+}
+
+#[test]
+fn empty_meta_emits_no_front_matter() {
+    let md = doc_with_meta(crate::model::DocumentMeta::default(), vec![heading(1, "Only body")]);
+    assert_eq!(md, "# Only body\n");
+}
+
+#[test]
+fn uniform_heading_bold_is_stripped() {
+    // `#` already conveys heading weight; a whole-heading bold is redundant.
+    let md = doc(vec![Block::heading(1, vec![styled("Title", BOLD)])]);
+    assert_eq!(md, "# Title\n");
+    // Italic and bold+italic strip the same way.
+    let md = doc(vec![Block::heading(2, vec![styled("t", ITALIC)])]);
+    assert_eq!(md, "## t\n");
+    let md = doc(vec![Block::heading(3, vec![styled("x", BOLDITALIC)])]);
+    assert_eq!(md, "### x\n");
+}
+
+#[test]
+fn uniform_heading_bold_survives_whitespace_only_runs() {
+    // `[bold "A"][plain " "][bold "B"]`: the whitespace run is unstyled but
+    // must not veto the strip. Without ignoring it the output stays `# **A B**`.
+    let md = doc(vec![Block::heading(
+        1,
+        vec![styled("A", BOLD), styled(" ", Style::PLAIN), styled("B", BOLD)],
+    )]);
+    assert_eq!(md, "# A B\n");
+}
+
+#[test]
+fn partial_heading_emphasis_is_preserved() {
+    // Only part of the heading is bold, so it is real emphasis, not the
+    // whole-heading weight `#` conveys.
+    let md = doc(vec![Block::heading(1, vec![styled("A", BOLD), Inline::plain(" b")])]);
+    assert_eq!(md, "# **A** b\n");
+}
+
+#[test]
+fn text_free_heading_is_left_alone() {
+    // A heading with no text run (image only) has nothing to strip and must
+    // not panic; its content still renders.
+    let md = doc(vec![Block::Heading {
+        level: 1,
+        anchor: None,
+        content: vec![Inline::Image { alt: "pic".into(), source: ImageSource::Unavailable }],
+    }]);
+    assert_eq!(md, "# pic\n");
 }
 
 #[test]
@@ -393,6 +485,7 @@ fn footnotes() {
             ),
         ],
         assets: Vec::new(),
+        meta: Default::default(),
     });
     assert_eq!(
         md,
@@ -412,6 +505,7 @@ fn empty_and_unreferenced_notes() {
             note("orphan", vec![Block::Paragraph(vec![Inline::plain("Kept.")])]),
         ],
         assets: Vec::new(),
+        meta: Default::default(),
     });
     assert_eq!(md, "Text\n\n[^1]: Kept.\n");
 }
@@ -425,6 +519,7 @@ fn duplicate_note_ids_render_one_definition() {
             note("a", vec![Block::Paragraph(vec![Inline::plain("Duplicate dropped.")])]),
         ],
         assets: Vec::new(),
+        meta: Default::default(),
     });
     assert_eq!(md, "Text[^1]\n\n[^1]: First wins.\n");
 }
